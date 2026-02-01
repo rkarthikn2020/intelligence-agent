@@ -13,6 +13,17 @@ app.config['SECRET_KEY'] = config.SECRET_KEY
 # Initialize database when app starts (important for Railway)
 database.init_db()
 
+# Populate database on first startup
+import os
+if not os.path.exists('intelligence.db') or os.path.getsize('intelligence.db') < 5000:
+    print("🔄 Database empty - running initial data collection...")
+    try:
+        import daily_job
+        daily_job.run_daily_job()
+        print("✅ Initial data collection complete!")
+    except Exception as e:
+        print(f"⚠️  Initial data collection failed: {e}")
+
 @app.route('/')
 def index():
     """Main dashboard page"""
