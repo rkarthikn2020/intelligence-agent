@@ -5,7 +5,7 @@ from datetime import datetime
 import scraper
 import analyzer
 import database
-import emailer
+import sendgrid_emailer as emailer
 import config
 
 def run_daily_job():
