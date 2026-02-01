@@ -101,9 +101,10 @@ def stats():
     })
 
 if __name__ == '__main__':
-    # Initialize database
-    database.init_db()
-    
+    # Initialize database when app starts (important for Railway)
+database.init_db()
+
+if __name__ == '__main__':
     # Run the Flask app
     print(f"🌐 Starting Dashboard on http://0.0.0.0:{config.PORT}")
     print(f"📊 Dashboard URL: http://localhost:{config.PORT}")
