@@ -91,4 +91,20 @@ def stats():
     topics = {}
     for article in week_articles:
         article_topics = article.get('topics', [])
-        if
+        if isinstance(article_topics, list):
+            for topic in article_topics:
+                topics[topic] = topics.get(topic, 0) + 1
+    
+    return jsonify({
+        'success': True,
+        'today_count': len(today_articles),
+        'week_count': len(week_articles),
+        'sources': sources,
+        'topics': topics
+    })
+
+if __name__ == '__main__':
+    # Run the Flask app
+    print(f"🌐 Starting Dashboard on http://0.0.0.0:{config.PORT}")
+    print(f"📊 Dashboard URL: http://localhost:{config.PORT}")
+    app.run(host='0.0.0.0', port=config.PORT, debug=config.DEBUG)
