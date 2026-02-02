@@ -10,30 +10,27 @@ import json
 # PDF processing
 try:
     from PyPDF2 import PdfReader
+    PDF_AVAILABLE = True
 except ImportError:
-    PdfReader = None
+    PDF_AVAILABLE = False
 
 # Excel processing
 try:
     import pandas as pd
     import openpyxl
+    EXCEL_AVAILABLE = True
 except ImportError:
+    EXCEL_AVAILABLE = False
     pd = None
     openpyxl = None
 
 # Word document processing
 try:
     from docx import Document as DocxDocument
+    DOCX_AVAILABLE = True
 except ImportError:
+    DOCX_AVAILABLE = False
     DocxDocument = None
-
-# Image processing (for PDFs with images)
-try:
-    from PIL import Image
-    import pytesseract
-except ImportError:
-    Image = None
-    pytesseract = None
 
 
 class DocumentProcessor:
@@ -91,7 +88,7 @@ class DocumentProcessor:
     
     def process_pdf(self, file_path_or_bytes, filename):
         """Extract text and tables from PDF"""
-        if PdfReader is None:
+        if not PDF_AVAILABLE:
             return {'success': False, 'error': 'PyPDF2 not installed'}
         
         try:
@@ -135,8 +132,8 @@ class DocumentProcessor:
     
     def process_excel(self, file_path_or_bytes, filename):
         """Extract data from Excel files"""
-        if pd is None:
-            return {'success': False, 'error': 'pandas not installed'}
+        if not EXCEL_AVAILABLE:
+            return {'success': False, 'error': 'pandas/openpyxl not installed'}
         
         try:
             # Read Excel file
@@ -196,7 +193,7 @@ class DocumentProcessor:
     
     def process_word(self, file_path_or_bytes, filename):
         """Extract text from Word documents"""
-        if DocxDocument is None:
+        if not DOCX_AVAILABLE:
             return {'success': False, 'error': 'python-docx not installed'}
         
         try:
