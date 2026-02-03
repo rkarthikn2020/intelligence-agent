@@ -1,372 +1,305 @@
 """
-Database module for storing articles and summaries
+Database module for PostgreSQL + pgvector
+Handles articles, uploaded documents, and vector embeddings
 """
-import sqlite3
-from datetime import datetime, timedelta
+import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from datetime import datetime
 import json
-import config
+
+# Get DATABASE_URL from environment (Railway provides this automatically)
+DATABASE_URL = os.getenv('DATABASE_URL')
+
+def get_connection():
+    """Get PostgreSQL connection"""
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL environment variable not set!")
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
-    """Initialize the database with required tables"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
-    cursor = conn.cursor()
-    
-    # Articles table (enhanced with full content and vector status)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS articles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            url TEXT UNIQUE NOT NULL,
-            source TEXT NOT NULL,
-            summary TEXT,
-            topics TEXT,
-            content TEXT,
-            full_content TEXT,
-            published_date TEXT,
-            scraped_date TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            word_count INTEGER DEFAULT 0,
-            vector_indexed BOOLEAN DEFAULT 0,
-            last_indexed_at TIMESTAMP
-        )
-    ''')
-    
-    # Uploaded documents table (NEW)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS uploaded_documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT NOT NULL,
-            file_type TEXT NOT NULL,
-            extracted_text TEXT,
-            structured_data TEXT,
-            upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            processed BOOLEAN DEFAULT 0,
-            vector_indexed BOOLEAN DEFAULT 0,
-            metadata TEXT,
-            file_size INTEGER
-        )
-    ''')
-    
-    # System configuration table (NEW)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS system_config (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Create indices for better performance
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_articles_date ON articles(scraped_date DESC)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_articles_source ON articles(source)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_articles_vector ON articles(vector_indexed)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_uploads_date ON uploaded_documents(upload_date DESC)')
-    
-    conn.commit()
-    conn.close()
-    print("✅ Database initialized successfully")
-
-def save_article(title, url, source, summary, topics, content="", full_content="", published_date=None):
-    """Save an article to the database"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
+    """Initialize PostgreSQL database with pgvector extension"""
+    conn = get_connection()
     cursor = conn.cursor()
     
     try:
-        scraped_date = datetime.now().strftime("%Y-%m-%d")
-        topics_json = json.dumps(topics) if isinstance(topics, list) else topics
+        # Enable pgvector extension
+        print("🔧 Enabling pgvector extension...")
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
         
-        # Calculate word count
-        text_for_count = full_content if full_content else content
-        word_count = len(text_for_count.split()) if text_for_count else 0
-        
+        # Articles table with vector support
+        print("📊 Creating articles table...")
         cursor.execute('''
-            INSERT OR REPLACE INTO articles 
-            (title, url, source, summary, topics, content, full_content, published_date, scraped_date, word_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (title, url, source, summary, topics_json, content, full_content, published_date, scraped_date, word_count))
+            CREATE TABLE IF NOT EXISTS articles (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                url TEXT UNIQUE NOT NULL,
+                source TEXT NOT NULL,
+                summary TEXT,
+                topics TEXT,
+                content TEXT,
+                full_content TEXT,
+                published_date TIMESTAMP,
+                scraped_date TIMESTAMP NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                word_count INTEGER DEFAULT 0,
+                vector_indexed BOOLEAN DEFAULT FALSE,
+                last_indexed_at TIMESTAMP,
+                embedding vector(1536)
+            )
+        ''')
+        
+        # Create index for vector similarity search
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS articles_embedding_idx 
+            ON articles USING ivfflat (embedding vector_cosine_ops)
+        ''')
+        
+        # Uploaded documents table
+        print("📁 Creating uploaded_documents table...")
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS uploaded_documents (
+                id SERIAL PRIMARY KEY,
+                filename TEXT NOT NULL,
+                original_filename TEXT,
+                file_type TEXT NOT NULL,
+                file_path TEXT,
+                file_size INTEGER,
+                extracted_text TEXT,
+                structured_data TEXT,
+                word_count INTEGER DEFAULT 0,
+                page_count INTEGER,
+                upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                processed BOOLEAN DEFAULT FALSE,
+                vector_indexed BOOLEAN DEFAULT FALSE,
+                last_indexed_at TIMESTAMP,
+                uploaded_by TEXT,
+                metadata TEXT,
+                embedding vector(1536)
+            )
+        ''')
+        
+        # Create index for vector similarity search on documents
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS documents_embedding_idx 
+            ON uploaded_documents USING ivfflat (embedding vector_cosine_ops)
+        ''')
+        
+        # System configuration table
+        print("⚙️  Creating system_config table...")
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS system_config (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Daily summaries table
+        print("📅 Creating daily_summaries table...")
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS daily_summaries (
+                id SERIAL PRIMARY KEY,
+                date DATE UNIQUE NOT NULL,
+                summary TEXT NOT NULL,
+                article_count INTEGER,
+                topics TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         conn.commit()
-        return cursor.lastrowid
-    except sqlite3.IntegrityError:
-        print(f"⚠️  Article already exists: {url}")
-        return None
+        print("✅ Database initialized successfully!")
+        
+    except Exception as e:
+        conn.rollback()
+        print(f"❌ Error initializing database: {e}")
+        raise
     finally:
+        cursor.close()
         conn.close()
 
-def get_recent_articles(days=7):
-    """Get articles from the last N days"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    
-    cursor.execute('''
-        SELECT * FROM articles 
-        WHERE scraped_date >= ?
-        ORDER BY scraped_date DESC, created_at DESC
-    ''', (cutoff_date,))
-    
-    articles = [dict(row) for row in cursor.fetchall()]
-    
-    # Parse topics JSON
-    for article in articles:
-        if article['topics']:
-            try:
-                article['topics'] = json.loads(article['topics'])
-            except:
-                article['topics'] = []
-    
-    conn.close()
-    return articles
-
-def get_today_articles():
-    """Get articles scraped today"""
-    today = datetime.now().strftime("%Y-%m-%d")
-    conn = sqlite3.connect(config.DATABASE_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT * FROM articles 
-        WHERE scraped_date = ?
-        ORDER BY created_at DESC
-    ''', (today,))
-    
-    articles = [dict(row) for row in cursor.fetchall()]
-    
-    # Parse topics JSON
-    for article in articles:
-        if article['topics']:
-            try:
-                article['topics'] = json.loads(article['topics'])
-            except:
-                article['topics'] = []
-    
-    conn.close()
-    return articles
-
-def search_articles(query, days=30):
-    """Search articles by keyword"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    search_term = f"%{query}%"
-    
-    cursor.execute('''
-        SELECT * FROM articles 
-        WHERE scraped_date >= ?
-        AND (title LIKE ? OR summary LIKE ? OR content LIKE ?)
-        ORDER BY scraped_date DESC, created_at DESC
-        LIMIT 50
-    ''', (cutoff_date, search_term, search_term, search_term))
-    
-    articles = [dict(row) for row in cursor.fetchall()]
-    
-    # Parse topics JSON
-    for article in articles:
-        if article['topics']:
-            try:
-                article['topics'] = json.loads(article['topics'])
-            except:
-                article['topics'] = []
-    
-    conn.close()
-    return articles
-
-def get_all_articles_text(days=30):
-    """Get all article content for chatbot context"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    
-    cursor.execute('''
-        SELECT title, source, summary, content, full_content, scraped_date, url FROM articles 
-        WHERE scraped_date >= ?
-        ORDER BY scraped_date DESC
-    ''', (cutoff_date,))
-    
-    articles = [dict(row) for row in cursor.fetchall()]
-    conn.close()
-    return articles
-
-# ============================================================================
-# NEW FUNCTIONS FOR ENHANCED FEATURES
-# ============================================================================
-
-def save_uploaded_document(filename, file_type, extracted_text, structured_data=None, metadata=None, file_size=0):
-    """Save an uploaded document to the database"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
+def save_article(article_data):
+    """Save article to database"""
+    conn = get_connection()
     cursor = conn.cursor()
     
     try:
-        structured_json = json.dumps(structured_data) if structured_data else None
-        metadata_json = json.dumps(metadata) if metadata else None
+        cursor.execute('''
+            INSERT INTO articles 
+            (title, url, source, summary, topics, content, full_content, 
+             published_date, scraped_date, word_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (url) DO UPDATE SET
+                summary = EXCLUDED.summary,
+                topics = EXCLUDED.topics,
+                content = EXCLUDED.content,
+                full_content = EXCLUDED.full_content,
+                word_count = EXCLUDED.word_count
+            RETURNING id
+        ''', (
+            article_data.get('title', ''),
+            article_data.get('url', ''),
+            article_data.get('source', ''),
+            article_data.get('summary', ''),
+            json.dumps(article_data.get('topics', [])),
+            article_data.get('content', ''),
+            article_data.get('full_content', ''),
+            article_data.get('published_date'),
+            article_data.get('scraped_date', datetime.now()),
+            article_data.get('word_count', 0)
+        ))
         
+        result = cursor.fetchone()
+        conn.commit()
+        return result['id'] if result else None
+        
+    except Exception as e:
+        conn.rollback()
+        print(f"Error saving article: {e}")
+        return None
+    finally:
+        cursor.close()
+        conn.close()
+
+def get_recent_articles(days=7, limit=100):
+    """Get recent articles from the database"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            SELECT * FROM articles 
+            WHERE scraped_date >= CURRENT_TIMESTAMP - INTERVAL '%s days'
+            ORDER BY scraped_date DESC 
+            LIMIT %s
+        ''', (days, limit))
+        
+        articles = cursor.fetchall()
+        return articles
+        
+    finally:
+        cursor.close()
+        conn.close()
+
+def save_daily_summary(date, summary, article_count, topics):
+    """Save daily summary"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            INSERT INTO daily_summaries (date, summary, article_count, topics)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (date) DO UPDATE SET
+                summary = EXCLUDED.summary,
+                article_count = EXCLUDED.article_count,
+                topics = EXCLUDED.topics
+        ''', (date, summary, article_count, json.dumps(topics)))
+        
+        conn.commit()
+        
+    except Exception as e:
+        conn.rollback()
+        print(f"Error saving daily summary: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+def get_article_count():
+    """Get total article count"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('SELECT COUNT(*) as count FROM articles')
+        result = cursor.fetchone()
+        return result['count'] if result else 0
+        
+    finally:
+        cursor.close()
+        conn.close()
+
+def save_uploaded_document(doc_data):
+    """Save uploaded document metadata"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
         cursor.execute('''
             INSERT INTO uploaded_documents 
-            (filename, file_type, extracted_text, structured_data, metadata, file_size, processed)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
-        ''', (filename, file_type, extracted_text, structured_json, metadata_json, file_size))
+            (filename, original_filename, file_type, file_path, file_size,
+             extracted_text, word_count, page_count, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        ''', (
+            doc_data.get('filename'),
+            doc_data.get('original_filename'),
+            doc_data.get('file_type'),
+            doc_data.get('file_path'),
+            doc_data.get('file_size', 0),
+            doc_data.get('extracted_text', ''),
+            doc_data.get('word_count', 0),
+            doc_data.get('page_count', 0),
+            json.dumps(doc_data.get('metadata', {}))
+        ))
         
+        result = cursor.fetchone()
         conn.commit()
-        return cursor.lastrowid
+        return result['id'] if result else None
+        
     except Exception as e:
-        print(f"❌ Error saving uploaded document: {e}")
+        conn.rollback()
+        print(f"Error saving document: {e}")
         return None
     finally:
+        cursor.close()
         conn.close()
 
-def get_uploaded_documents(days=30):
-    """Get recently uploaded documents"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
-    conn.row_factory = sqlite3.Row
+def get_uploaded_documents(limit=50):
+    """Get uploaded documents"""
+    conn = get_connection()
     cursor = conn.cursor()
     
-    cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    
-    cursor.execute('''
-        SELECT * FROM uploaded_documents 
-        WHERE upload_date >= ?
-        ORDER BY upload_date DESC
-    ''', (cutoff_date,))
-    
-    docs = [dict(row) for row in cursor.fetchall()]
-    
-    # Parse JSON fields
-    for doc in docs:
-        if doc['structured_data']:
-            try:
-                doc['structured_data'] = json.loads(doc['structured_data'])
-            except:
-                doc['structured_data'] = None
-        if doc['metadata']:
-            try:
-                doc['metadata'] = json.loads(doc['metadata'])
-            except:
-                doc['metadata'] = {}
-    
-    conn.close()
-    return docs
-
-def mark_document_indexed(doc_id, doc_type='article'):
-    """Mark a document as vector indexed"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
-    cursor = conn.cursor()
-    
-    table = 'articles' if doc_type == 'article' else 'uploaded_documents'
-    timestamp = datetime.now().isoformat()
-    
-    cursor.execute(f'''
-        UPDATE {table}
-        SET vector_indexed = 1, last_indexed_at = ?
-        WHERE id = ?
-    ''', (timestamp, doc_id))
-    
-    conn.commit()
-    conn.close()
-
-def get_unindexed_documents(doc_type='all'):
-    """Get documents that haven't been vector indexed yet"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
-    conn.row_factory = sqlite3.Row
-    
-    documents = []
-    
-    if doc_type in ['all', 'article']:
-        cursor = conn.cursor()
+    try:
         cursor.execute('''
-            SELECT id, title as filename, full_content as text, 'article' as type
-            FROM articles 
-            WHERE vector_indexed = 0 AND full_content IS NOT NULL AND full_content != ''
-            ORDER BY created_at DESC
-            LIMIT 100
-        ''')
-        documents.extend([dict(row) for row in cursor.fetchall()])
-    
-    if doc_type in ['all', 'upload']:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT id, filename, extracted_text as text, 'upload' as type
-            FROM uploaded_documents 
-            WHERE vector_indexed = 0 AND extracted_text IS NOT NULL AND extracted_text != ''
-            ORDER BY upload_date DESC
-            LIMIT 100
-        ''')
-        documents.extend([dict(row) for row in cursor.fetchall()])
-    
-    conn.close()
-    return documents
+            SELECT * FROM uploaded_documents 
+            ORDER BY upload_date DESC 
+            LIMIT %s
+        ''', (limit,))
+        
+        documents = cursor.fetchall()
+        return documents
+        
+    finally:
+        cursor.close()
+        conn.close()
 
-def save_config(key, value):
-    """Save system configuration"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
+def update_vector_indexed(table, doc_id, indexed=True):
+    """Mark document as vector indexed"""
+    conn = get_connection()
     cursor = conn.cursor()
     
-    timestamp = datetime.now().isoformat()
-    
-    cursor.execute('''
-        INSERT OR REPLACE INTO system_config (key, value, updated_at)
-        VALUES (?, ?, ?)
-    ''', (key, value, timestamp))
-    
-    conn.commit()
-    conn.close()
-
-def get_config(key, default=None):
-    """Get system configuration"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT value FROM system_config WHERE key = ?', (key,))
-    row = cursor.fetchone()
-    
-    conn.close()
-    return row[0] if row else default
-
-def get_all_config():
-    """Get all system configuration"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT * FROM system_config ORDER BY key')
-    configs = {row['key']: row['value'] for row in cursor.fetchall()}
-    
-    conn.close()
-    return configs
-
-def get_stats():
-    """Get database statistics"""
-    conn = sqlite3.connect(config.DATABASE_NAME)
-    cursor = conn.cursor()
-    
-    stats = {}
-    
-    # Article counts
-    cursor.execute('SELECT COUNT(*) FROM articles')
-    stats['total_articles'] = cursor.fetchone()[0]
-    
-    cursor.execute('SELECT COUNT(*) FROM articles WHERE vector_indexed = 1')
-    stats['indexed_articles'] = cursor.fetchone()[0]
-    
-    # Upload counts
-    cursor.execute('SELECT COUNT(*) FROM uploaded_documents')
-    stats['total_uploads'] = cursor.fetchone()[0]
-    
-    cursor.execute('SELECT COUNT(*) FROM uploaded_documents WHERE vector_indexed = 1')
-    stats['indexed_uploads'] = cursor.fetchone()[0]
-    
-    # Sources
-    cursor.execute('SELECT source, COUNT(*) as count FROM articles GROUP BY source')
-    stats['by_source'] = dict(cursor.fetchall())
-    
-    conn.close()
-    return stats
+    try:
+        cursor.execute(f'''
+            UPDATE {table}
+            SET vector_indexed = %s, last_indexed_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        ''', (indexed, doc_id))
+        
+        conn.commit()
+        
+    except Exception as e:
+        conn.rollback()
+        print(f"Error updating vector index status: {e}")
+    finally:
+        cursor.close()
+        conn.close()
 
 if __name__ == "__main__":
-    init_db()
+    print("Testing PostgreSQL connection...")
+    try:
+        init_db()
+        print("✅ Database test successful!")
+    except Exception as e:
+        print(f"❌ Database test failed: {e}")
