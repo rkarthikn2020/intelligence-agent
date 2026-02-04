@@ -93,8 +93,13 @@ def get_chatbot_response(user_question, articles_context):
         # Prepare context from recent articles
         context = "Recent articles and summaries:\n\n"
         for article in articles_context[:20]:  # Use last 20 articles for context
-            context += f"- {article['title']} ({article['source']}, {article['scraped_date']})\n"
-            context += f"  Summary: {article['summary']}\n"
+            # Handle datetime fields safely
+            scraped_date = article.get('scraped_date', 'Unknown date')
+            if hasattr(scraped_date, 'strftime'):
+                scraped_date = scraped_date.strftime('%Y-%m-%d')
+            
+            context += f"- {article['title']} ({article['source']}, {scraped_date})\n"
+            context += f"  Summary: {article.get('summary', 'No summary')}\n"
             context += f"  URL: {article['url']}\n\n"
         
         prompt = f"""You are a helpful assistant that answers questions about recent articles on AI, Digital Transformation, Koch Industries, and Guardian Industries.
