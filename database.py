@@ -115,15 +115,19 @@ def init_db():
         cursor.close()
         conn.close()
 
-def save_article(article_data):
-    """Save article to database"""
+def save_article(article_data=None, **kwargs):
+    """Save article to database - accepts dict or keyword arguments"""
     conn = get_connection()
     cursor = conn.cursor()
+    
+    # Support both dict and keyword arguments
+    if article_data is None:
+        article_data = kwargs
     
     try:
         cursor.execute('''
             INSERT INTO articles 
-            (title, url, source, summary, topics, content, full_content, 
+            (title, url, source, summary, topics, content, full_content, \
              published_date, scraped_date, word_count)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (url) DO UPDATE SET
@@ -170,6 +174,68 @@ def get_recent_articles(days=7, limit=100):
             ORDER BY scraped_date DESC 
             LIMIT %s
         ''', (days, limit))
+        
+        articles = cursor.fetchall()
+        return articles
+        
+    finally:
+        cursor.close()
+        conn.close()
+
+def get_today_articles():
+    """Get articles scraped today"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            SELECT * FROM articles 
+            WHERE DATE(scraped_date) = CURRENT_DATE
+            ORDER BY scraped_date DESC
+        ''')
+        
+        articles = cursor.fetchall()
+        return articles
+        
+    finally:
+        cursor.close()
+        conn.close()
+
+def get_all_articles_text(days=30):
+    """Get all article text for analysis"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            SELECT id, title, url, source, summary, full_content, published_date
+            FROM articles 
+            WHERE scraped_date >= CURRENT_TIMESTAMP - INTERVAL '%s days'
+            ORDER BY scraped_date DESC
+        ''', (days,))
+        
+        articles = cursor.fetchall()
+        return articles
+        
+    finally:
+        cursor.close()
+        conn.close()
+
+def search_articles(query):
+    """Search articles by text (simple text search)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        search_pattern = f'%{query}%'
+        cursor.execute('''
+            SELECT * FROM articles 
+            WHERE title ILIKE %s 
+                OR summary ILIKE %s 
+                OR full_content ILIKE %s
+            ORDER BY scraped_date DESC
+            LIMIT 50
+        ''', (search_pattern, search_pattern, search_pattern))
         
         articles = cursor.fetchall()
         return articles
