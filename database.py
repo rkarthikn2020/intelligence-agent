@@ -18,16 +18,12 @@ def get_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
-    """Initialize PostgreSQL database with pgvector extension"""
+    """Initialize PostgreSQL database (vectors stored as JSON)"""
     conn = get_connection()
     cursor = conn.cursor()
     
     try:
-        # Enable pgvector extension
-        print("🔧 Enabling pgvector extension...")
-        cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-        
-        # Articles table with vector support
+        # Articles table with vector support (JSON format - no pgvector needed!)
         print("📊 Creating articles table...")
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS articles (
@@ -45,14 +41,14 @@ def init_db():
                 word_count INTEGER DEFAULT 0,
                 vector_indexed BOOLEAN DEFAULT FALSE,
                 last_indexed_at TIMESTAMP,
-                embedding vector(1536)
+                embedding TEXT
             )
         ''')
         
-        # Create index for vector similarity search
+        # Index for faster lookups
         cursor.execute('''
-            CREATE INDEX IF NOT EXISTS articles_embedding_idx 
-            ON articles USING ivfflat (embedding vector_cosine_ops)
+            CREATE INDEX IF NOT EXISTS articles_vector_indexed_idx 
+            ON articles(vector_indexed) WHERE vector_indexed = TRUE
         ''')
         
         # Uploaded documents table
@@ -75,14 +71,14 @@ def init_db():
                 last_indexed_at TIMESTAMP,
                 uploaded_by TEXT,
                 metadata TEXT,
-                embedding vector(1536)
+                embedding TEXT
             )
         ''')
         
-        # Create index for vector similarity search on documents
+        # Index for faster lookups
         cursor.execute('''
-            CREATE INDEX IF NOT EXISTS documents_embedding_idx 
-            ON uploaded_documents USING ivfflat (embedding vector_cosine_ops)
+            CREATE INDEX IF NOT EXISTS documents_vector_indexed_idx 
+            ON uploaded_documents(vector_indexed) WHERE vector_indexed = TRUE
         ''')
         
         # System configuration table
